@@ -11,10 +11,22 @@ const OdometerOCRSystem = () => {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
 
+  // Initialize video element on mount
   useEffect(() => {
+    // Create and attach video element
+    const videoElement = document.createElement('video');
+    videoElement.autoplay = true;
+    videoElement.playsInline = true;
+    videoElement.muted = true;
+    videoRef.current = videoElement;
+
+    // Cleanup on unmount
     return () => {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
+      }
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
       }
     };
   }, []);
@@ -33,6 +45,7 @@ const OdometerOCRSystem = () => {
         throw new Error('Camera access requires HTTPS (except on localhost)');
       }
 
+      // Stop any existing stream
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
@@ -47,27 +60,38 @@ const OdometerOCRSystem = () => {
 
       streamRef.current = stream;
 
+      // Ensure video element exists
       if (!videoRef.current) {
-        throw new Error('Video element not found');
+        throw new Error('Video element not initialized');
       }
 
+      // Set up video element
       videoRef.current.srcObject = stream;
       
+      // Wait for video to be ready
       await new Promise((resolve, reject) => {
-        videoRef.current.onloadedmetadata = resolve;
-        videoRef.current.onerror = reject;
-        
         const timeoutId = setTimeout(() => {
           reject(new Error('Video stream timed out'));
         }, 5000);
-        
+
         videoRef.current.onloadedmetadata = () => {
           clearTimeout(timeoutId);
           resolve();
         };
+
+        videoRef.current.onerror = (err) => {
+          clearTimeout(timeoutId);
+          reject(new Error('Video failed to load: ' + err.message));
+        };
       });
 
-      await videoRef.current.play();
+      // Try to play the video
+      try {
+        await videoRef.current.play();
+      } catch (playError) {
+        throw new Error('Failed to play video stream: ' + playError.message);
+      }
+
       setIsScanning(true);
       
     } catch (err) {
@@ -87,6 +111,7 @@ const OdometerOCRSystem = () => {
       console.error('Camera start error:', err);
       setIsScanning(false);
       
+      // Cleanup on error
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
         streamRef.current = null;
@@ -127,6 +152,7 @@ const OdometerOCRSystem = () => {
       const imageData = canvas.toDataURL('image/jpeg', 0.8);
       setCapturedImage(imageData);
 
+      // Simulate OCR processing
       await new Promise(resolve => setTimeout(resolve, 1000));
       const simulatedReading = Math.floor(Math.random() * 100000);
       
@@ -194,38 +220,46 @@ const OdometerOCRSystem = () => {
           )}
 
           <div className="position-relative bg-light rounded overflow-hidden" style={{ aspectRatio: '16/9' }}>
-            {isScanning ? (
-              <>
-                <video 
-                  ref={videoRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className="w-100 h-100 object-fit-cover"
-                />
-                <div className="position-absolute top-0 start-0 w-100 h-100">
-                  <div className="position-absolute" style={{ 
-                    left: '25%', 
-                    right: '25%', 
-                    top: '33%', 
-                    bottom: '33%', 
-                    border: '2px solid #0d6efd' 
-                  }}>
-                    <div className="position-absolute w-100 h-100" style={{
-                      borderTop: '2px solid #0d6efd',
-                      borderBottom: '2px solid #0d6efd',
-                      opacity: 0.5
-                    }} />
-                  </div>
+            {isScanning && videoRef.current && (
+              <div className="video-container w-100 h-100">
+                {/* Attach the video element to the DOM when scanning */}
+                {videoRef.current instanceof HTMLVideoElement && 
+                  document.body.appendChild(videoRef.current) &&
+                  (() => {
+                    videoRef.current.style.width = '100%';
+                    videoRef.current.style.height = '100%';
+                    videoRef.current.style.objectFit = 'cover';
+                    return null;
+                  })()
+                }
+              </div>
+            )}
+            
+            {isScanning && (
+              <div className="position-absolute top-0 start-0 w-100 h-100">
+                <div className="position-absolute" style={{ 
+                  left: '25%', 
+                  right: '25%', 
+                  top: '33%', 
+                  bottom: '33%', 
+                  border: '2px solid #0d6efd' 
+                }}>
+                  <div className="position-absolute w-100 h-100" style={{
+                    borderTop: '2px solid #0d6efd',
+                    borderBottom: '2px solid #0d6efd',
+                    opacity: 0.5
+                  }} />
                 </div>
-              </>
-            ) : capturedImage ? (
+              </div>
+            )}
+
+            {!isScanning && capturedImage ? (
               <img 
                 src={capturedImage} 
                 alt="Captured odometer"
                 className="w-100 h-100 object-fit-cover"
               />
-            ) : (
+            ) : !isScanning && (
               <div className="d-flex align-items-center justify-content-center h-100">
                 <p className="text-muted">Camera preview will appear here</p>
               </div>
