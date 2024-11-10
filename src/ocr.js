@@ -11,14 +11,21 @@ const OdometerOCRSystem = () => {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
 
-  // Check for camera support on component mount
   useEffect(() => {
-    checkCameraSupport();
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
+    };
   }, []);
 
-  const checkCameraSupport = async () => {
+  const startCamera = async () => {
     try {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setError(null);
+      setCapturedImage(null);
+      setOcrResult('');
+
+      if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error('Camera API is not supported in this browser');
       }
 
@@ -26,20 +33,9 @@ const OdometerOCRSystem = () => {
         throw new Error('Camera access requires HTTPS (except on localhost)');
       }
 
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const videoDevices = devices.filter(device => device.kind === 'videoinput');
-      if (videoDevices.length === 0) {
-        throw new Error('No camera devices found');
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
       }
-    } catch (err) {
-      setError(`Camera initialization error: ${err.message}`);
-      console.error('Camera support check failed:', err);
-    }
-  };
-
-  const startCamera = async () => {
-    try {
-      setError(null);
 
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -51,23 +47,53 @@ const OdometerOCRSystem = () => {
 
       streamRef.current = stream;
 
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await new Promise((resolve) => {
-          videoRef.current.onloadedmetadata = () => {
-            resolve();
-          };
-        });
-        
-        await videoRef.current.play();
-        setIsScanning(true);
-      } else {
-        throw new Error('Video element not initialized');
+      if (!videoRef.current) {
+        throw new Error('Video element not found');
       }
+
+      videoRef.current.srcObject = stream;
+      
+      await new Promise((resolve, reject) => {
+        videoRef.current.onloadedmetadata = resolve;
+        videoRef.current.onerror = reject;
+        
+        const timeoutId = setTimeout(() => {
+          reject(new Error('Video stream timed out'));
+        }, 5000);
+        
+        videoRef.current.onloadedmetadata = () => {
+          clearTimeout(timeoutId);
+          resolve();
+        };
+      });
+
+      await videoRef.current.play();
+      setIsScanning(true);
+      
     } catch (err) {
-      setError(`Error accessing camera: ${err.message}`);
+      let errorMessage = 'Error accessing camera: ';
+      
+      if (err.name === 'NotAllowedError') {
+        errorMessage += 'Camera permission denied. Please allow camera access.';
+      } else if (err.name === 'NotFoundError') {
+        errorMessage += 'No camera found on this device.';
+      } else if (err.name === 'NotReadableError') {
+        errorMessage += 'Camera is already in use by another application.';
+      } else {
+        errorMessage += err.message || 'Unknown error occurred';
+      }
+      
+      setError(errorMessage);
       console.error('Camera start error:', err);
       setIsScanning(false);
+      
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+        streamRef.current = null;
+      }
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
     }
   };
 
@@ -83,64 +109,81 @@ const OdometerOCRSystem = () => {
   };
 
   const captureAndProcess = async () => {
-    if (!videoRef.current) return;
-
-    setIsProcessing(true);
-    const canvas = document.createElement('canvas');
-    canvas.width = videoRef.current.videoWidth;
-    canvas.height = videoRef.current.videoHeight;
-    const ctx = canvas.getContext('2d');
-    
-    ctx.drawImage(videoRef.current, 0, 0);
-    
-    const imageData = canvas.toDataURL('image/jpeg');
-    setCapturedImage(imageData);
+    if (!videoRef.current || !videoRef.current.videoWidth) {
+      setError('Camera not ready. Please try again.');
+      return;
+    }
 
     try {
+      setIsProcessing(true);
+      setError(null);
+
+      const canvas = document.createElement('canvas');
+      canvas.width = videoRef.current.videoWidth;
+      canvas.height = videoRef.current.videoHeight;
+      const ctx = canvas.getContext('2d');
+      
+      ctx.drawImage(videoRef.current, 0, 0);
+      const imageData = canvas.toDataURL('image/jpeg', 0.8);
+      setCapturedImage(imageData);
+
       await new Promise(resolve => setTimeout(resolve, 1000));
       const simulatedReading = Math.floor(Math.random() * 100000);
+      
       setOcrResult(simulatedReading.toString());
-
+      
       const newReading = {
         id: Date.now(),
         reading: simulatedReading,
         timestamp: new Date().toLocaleString(),
         imageSrc: imageData
       };
-
-      setReadings([newReading, ...readings]);
+      
+      setReadings(prevReadings => [newReading, ...prevReadings]);
+      
     } catch (err) {
-      setError('Error processing image - please try again');
-      console.error("Processing Error:", err);
+      setError('Failed to capture and process image: ' + (err.message || 'Unknown error'));
+      console.error('Capture error:', err);
+    } finally {
+      setIsProcessing(false);
+      stopCamera();
     }
-
-    setIsProcessing(false);
-    stopCamera();
   };
 
   const deleteReading = (id) => {
-    setReadings(readings.filter(reading => reading.id !== id));
+    setReadings(prevReadings => prevReadings.filter(reading => reading.id !== id));
   };
 
   const exportReadings = () => {
-    const csv = readings
-      .map(r => `${r.timestamp},${r.reading}`)
-      .join('\n');
-    const blob = new Blob([`Timestamp,Reading\n${csv}`], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'odometer-readings.csv';
-    a.click();
-    URL.revokeObjectURL(url);
+    try {
+      const csv = ['Timestamp,Reading'];
+      readings.forEach(r => {
+        csv.push(`${r.timestamp},${r.reading}`);
+      });
+      
+      const blob = new Blob([csv.join('\n')], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `odometer-readings-${new Date().toISOString()}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError('Failed to export readings: ' + (err.message || 'Unknown error'));
+      console.error('Export error:', err);
+    }
   };
 
   return (
-    <div className="container my-5">
-      <div className="card mx-auto" style={{ maxWidth: '800px' }}>
+    <div className="container mt-4">
+      <div className="card">
         <div className="card-header">
-          <h2 className="h4">Odometer Scanner</h2>
-          <p className="text-muted">Align odometer numbers within the blue guide and capture</p>
+          <h2 className="card-title h4 mb-0">Odometer Scanner</h2>
+          <p className="text-muted small mb-0">
+            Align odometer numbers within the blue guide and capture
+          </p>
         </div>
         <div className="card-body">
           {error && (
@@ -150,49 +193,75 @@ const OdometerOCRSystem = () => {
             </div>
           )}
 
-          <div className="position-relative" style={{ aspectRatio: '16/9' }}>
+          <div className="position-relative bg-light rounded overflow-hidden" style={{ aspectRatio: '16/9' }}>
             {isScanning ? (
               <>
-                <video ref={videoRef} autoPlay muted className="w-100 h-100 object-cover" />
-                <div className="position-absolute top-0 start-25 end-25 bottom-0 border border-primary opacity-50" />
+                <video 
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-100 h-100 object-fit-cover"
+                />
+                <div className="position-absolute top-0 start-0 w-100 h-100">
+                  <div className="position-absolute" style={{ 
+                    left: '25%', 
+                    right: '25%', 
+                    top: '33%', 
+                    bottom: '33%', 
+                    border: '2px solid #0d6efd' 
+                  }}>
+                    <div className="position-absolute w-100 h-100" style={{
+                      borderTop: '2px solid #0d6efd',
+                      borderBottom: '2px solid #0d6efd',
+                      opacity: 0.5
+                    }} />
+                  </div>
+                </div>
               </>
             ) : capturedImage ? (
-              <img src={capturedImage} alt="Captured" className="w-100 h-100 object-cover" />
+              <img 
+                src={capturedImage} 
+                alt="Captured odometer"
+                className="w-100 h-100 object-fit-cover"
+              />
             ) : (
-              <div className="d-flex align-items-center justify-content-center w-100 h-100 text-muted">
-                Camera preview will appear here
+              <div className="d-flex align-items-center justify-content-center h-100">
+                <p className="text-muted">Camera preview will appear here</p>
               </div>
             )}
           </div>
 
           {ocrResult && (
-            <div className="my-4 text-center">
-              <h5>Detected Reading:</h5>
-              <p className="display-4 text-primary">{ocrResult}</p>
+            <div className="text-center p-4 bg-light rounded mt-3">
+              <h3 className="fw-bold h5">Detected Reading:</h3>
+              <p className="h3 text-primary">{ocrResult}</p>
             </div>
           )}
 
-          <div className="d-flex justify-content-center gap-4">
+          <div className="d-flex justify-content-center gap-2 mt-3">
             {!isScanning ? (
               <button
                 onClick={startCamera}
-                className="btn btn-primary"
+                className="btn btn-primary d-flex align-items-center gap-2"
                 disabled={isProcessing}
               >
-                <Camera size={20} /> Start Scanning
+                <Camera size={20} />
+                Start Scanning
               </button>
             ) : (
               <>
                 <button
                   onClick={captureAndProcess}
-                  className="btn btn-success"
+                  className="btn btn-success d-flex align-items-center gap-2"
                   disabled={isProcessing}
                 >
+                  <Camera size={20} />
                   {isProcessing ? 'Processing...' : 'Capture & Read'}
                 </button>
                 <button
                   onClick={stopCamera}
-                  className="btn btn-danger"
+                  className="btn btn-danger d-flex align-items-center gap-2"
                   disabled={isProcessing}
                 >
                   Stop
@@ -201,42 +270,46 @@ const OdometerOCRSystem = () => {
             )}
           </div>
 
-          <div className="mt-4">
-            <div className="d-flex justify-content-between align-items-center mb-2">
-              <h5>Reading History</h5>
-              {readings.length > 0 && (
+          {readings.length > 0 && (
+            <div className="mt-4">
+              <div className="d-flex justify-content-between align-items-center mb-3">
+                <h3 className="h5 mb-0">Reading History</h3>
                 <button
                   onClick={exportReadings}
-                  className="btn btn-success btn-sm"
+                  className="btn btn-success btn-sm d-flex align-items-center gap-2"
                 >
-                  <Save size={16} /> Export CSV
+                  <Save size={16} />
+                  Export CSV
                 </button>
-              )}
-            </div>
-            <div className="row row-cols-1 row-cols-md-2 g-4">
-              {readings.map((reading) => (
-                <div key={reading.id} className="col">
-                  <div className="card">
-                    <img
-                      src={reading.imageSrc}
-                      alt={`Scan from ${reading.timestamp}`}
-                      className="card-img-top"
-                    />
-                    <div className="card-body">
-                      <h5 className="card-title">{reading.reading} km</h5>
-                      <p className="card-text text-muted">{reading.timestamp}</p>
-                      <button
-                        onClick={() => deleteReading(reading.id)}
-                        className="btn btn-outline-danger btn-sm"
-                      >
-                        <Trash2 size={16} />
-                      </button>
+              </div>
+              <div className="row g-3">
+                {readings.map((reading) => (
+                  <div key={reading.id} className="col-md-6">
+                    <div className="card">
+                      <img 
+                        src={reading.imageSrc} 
+                        alt={`Scan from ${reading.timestamp}`}
+                        className="card-img-top"
+                        style={{ height: '200px', objectFit: 'cover' }}
+                      />
+                      <div className="card-body d-flex justify-content-between align-items-center">
+                        <div>
+                          <p className="fw-bold mb-0">{reading.reading} km</p>
+                          <p className="text-muted small mb-0">{reading.timestamp}</p>
+                        </div>
+                        <button
+                          onClick={() => deleteReading(reading.id)}
+                          className="btn btn-link text-danger p-0"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
-          </div>
+          )}
         </div>
       </div>
     </div>
